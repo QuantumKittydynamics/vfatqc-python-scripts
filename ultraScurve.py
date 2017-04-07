@@ -1,41 +1,30 @@
 #!/bin/env python
 """
 Script to take Scurve data using OH ultra scans
-By: Cameron Bravo c.bravo@cern.ch
+By: Cameron Bravo (c.bravo@cern.ch)
 """
 
-#import sys, os, random, time
+import sys
 from array import array
-from GEMDAQTestSuite import *
-from vfat_functions_uhal import *
-from optparse import OptionParser
-from ROOT import TFile,TTree
+from gempython.tools.vfat_user_functions_uhal import *
 
-parser = OptionParser()
+from qcoptions import parser
 
-parser.add_option("-s", "--slot", type="int", dest="slot",
-                  help="slot in uTCA crate", metavar="slot", default=10)
-parser.add_option("-g", "--gtx", type="int", dest="gtx",
-                  help="GTX on the GLIB", metavar="gtx", default=0)
-parser.add_option("--nglib", type="int", dest="nglib",
-                  help="Number of register tests to perform on the glib (default is 100)", metavar="nglib", default=100)
-parser.add_option("--noh", type="int", dest="noh",
-                  help="Number of register tests to perform on the OptoHybrid (default is 100)", metavar="noh", default=100)
-parser.add_option("--ni2c", type="int", dest="ni2c",
-                  help="Number of I2C tests to perform on the VFAT2s (default is 100)", metavar="ni2c", default=100)
-parser.add_option("--ntrk", type="int", dest="ntrk",
-                  help="Number of tracking data packets to readout (default is 100)", metavar="ntrk", default=100)
-parser.add_option("--writeout", action="store_true", dest="writeout",
-                  help="Write the data to disk when testing the rate", metavar="writeout")
-parser.add_option("--tests", type="string", dest="tests",default="A,B,C,D,E",
-                  help="Tests to run, default is all", metavar="tests")
-parser.add_option("-d", "--debug", action="store_true", dest="debug",
-                  help="print extra debugging information", metavar="debug")
+parser.add_option("-f", "--filename", type="string", dest="filename", default="SCurveData.root",
+                  help="Specify Output Filename", metavar="filename")
 
 (options, args) = parser.parse_args()
+uhal.setLogLevelTo( uhal.LogLevel.WARNING )
 
-myF = TFile('SCurveData.root','recreate')
-myT = TTree('scurveTree','Tree Holding CMS GEM SCurve Data')
+if options.debug:
+    uhal.setLogLevelTo( uhal.LogLevel.DEBUG )
+else:
+    uhal.setLogLevelTo( uhal.LogLevel.ERROR )
+
+import ROOT as r
+filename = options.filename
+myF = r.TFile(filename,'recreate')
+myT = r.TTree('scurveTree','Tree Holding CMS GEM SCurve Data')
 
 Nev = array( 'i', [ 0 ] )
 Nev[0] = 1000
@@ -48,26 +37,25 @@ vfatN = array( 'i', [ 0 ] )
 myT.Branch( 'vfatN', vfatN, 'vfatN/I' )
 vfatCH = array( 'i', [ 0 ] )
 myT.Branch( 'vfatCH', vfatCH, 'vfatCH/I' )
+trimRange = array( 'i', [ 0 ] )
+myT.Branch( 'trimRange', trimRange, 'trimRange/I' )
+vthr = array( 'i', [ 0 ] )
+myT.Branch( 'vthr', vthr, 'vthr/I' )
+trimDAC = array( 'i', [ 0 ] )
+myT.Branch( 'trimDAC', trimDAC, 'trimDAC/I' )
+link = array( 'i', [ 0 ] )
+myT.Branch( 'link', link, 'link/I' )
+link[0] = options.gtx
+utime = array( 'i', [ 0 ] )
+myT.Branch( 'utime', utime, 'utime/I' )
 
-import subprocess,datetime
-startTime = datetime.datetime.now().strftime("%d.%m.%Y-%H.%M.%S.%f")
+import subprocess,datetime,time
+utime[0] = int(time.time())
+startTime = datetime.datetime.now().strftime("%Y.%m.%d.%H.%M")
 print startTime
 Date = startTime
 
-test_params = TEST_PARAMS(nglib=options.nglib,
-                          noh=options.noh,
-                          ni2c=options.ni2c,
-                          ntrk=options.ntrk,
-                          writeout=options.writeout)
-
-testSuite = GEMDAQTestSuite(slot=options.slot,
-                            gtx=options.gtx,
-                            tests=options.tests,
-                            test_params=test_params,
-                            debug=options.debug)
-
-testSuite.runSelectedTests()
-testSuite.report()
+ohboard = getOHObject(options.slot,options.gtx,options.shelf,options.debug)
 
 SCURVE_MIN = 0
 SCURVE_MAX = 254
@@ -75,37 +63,74 @@ SCURVE_MAX = 254
 N_EVENTS = Nev[0]
 CHAN_MIN = 0
 CHAN_MAX = 128
+if options.debug:
+    CHAN_MAX = 5
+    pass
 mask = 0
 
-configureLocalT1(testSuite.glib, options.gtx, 1, 0, 40, 250, 0, options.debug)
-startLocalT1(testSuite.glib, options.gtx)
+try:
+    setTriggerSource(ohboard,options.gtx,1)
+    configureLocalT1(ohboard, options.gtx, 1, 0, 40, 250, 0, options.debug)
+    startLocalT1(ohboard, options.gtx)
 
-writeAllVFATs(testSuite.glib, options.gtx, "Latency",    37, mask)
-writeAllVFATs(testSuite.glib, options.gtx, "ContReg0",    0x37, mask)
+    print 'Link %i T1 controller status: %i'%(options.gtx,getLocalT1Status(ohboard,options.gtx))
 
-for scCH in range(CHAN_MIN,CHAN_MAX):
-    vfatCH[0] = scCH
-    print "Channel #"+str(scCH)
-    for vfat in testSuite.presentVFAT2sSingle:
-        trimVal = readVFAT(testSuite.glib,options.gtx,vfat,"VFATChannels.ChanReg%d"%(scCH+1))
-        writeVFAT(testSuite.glib,options.gtx,vfat,"VFATChannels.ChanReg%d"%(scCH+1),trimVal+64)
-    configureScanModule(testSuite.glib, options.gtx, 3, 0, scanmin = SCURVE_MIN, scanmax = SCURVE_MAX, numtrigs = int(N_EVENTS), useUltra = True, debug = options.debug)
-    printScanConfiguration(testSuite.glib, options.gtx, useUltra = True, debug = options.debug)
-    startScanModule(testSuite.glib, options.gtx, useUltra = True, debug = options.debug)
-    scanData = getUltraScanResults(testSuite.glib, options.gtx, SCURVE_MAX - SCURVE_MIN + 1, options.debug)
-    for i in range(0,24):
-        vfatN[0] = i
-        dataNow = scanData[i]
-        for VC in range(SCURVE_MIN,SCURVE_MAX+1):
-            vcal[0] = int((dataNow[VC] & 0xff000000) >> 24)
-            Nhits[0] = int(dataNow[VC] & 0xffffff)
-            myT.Fill()
-    for vfat in testSuite.presentVFAT2sSingle:
-        trimVal = readVFAT(testSuite.glib,options.gtx,vfat,"VFATChannels.ChanReg%d"%(scCH+1))
-        writeVFAT(testSuite.glib,options.gtx,vfat,"VFATChannels.ChanReg%d"%(scCH+1),trimVal-64)
+    #biasAllVFATs(ohboard,options.gtx,0x0,enable=False)
+    #writeAllVFATs(ohboard, options.gtx, "VThreshold1", 100, 0)
 
-stopLocalT1(testSuite.glib, options.gtx)
-myF.cd()
-myT.Write()
-myF.Close()
+    writeAllVFATs(ohboard, options.gtx, "Latency",    37, mask)
+    writeAllVFATs(ohboard, options.gtx, "ContReg0", 0x37, mask)
+    writeAllVFATs(ohboard, options.gtx, "ContReg2",   48, mask)
+
+    for vfat in range(0,24):
+        for scCH in range(CHAN_MIN,CHAN_MAX):
+            trimVal = (0x3f & readVFAT(ohboard,options.gtx,vfat,"VFATChannels.ChanReg%d"%(scCH)))
+            writeVFAT(ohboard,options.gtx,vfat,"VFATChannels.ChanReg%d"%(scCH),trimVal)
+
+    for scCH in range(CHAN_MIN,CHAN_MAX):
+        vfatCH[0] = scCH
+        print "Channel #"+str(scCH)
+        for vfat in range(0,24):
+            trimVal = (0x3f & readVFAT(ohboard,options.gtx,vfat,"VFATChannels.ChanReg%d"%(scCH)))
+            writeVFAT(ohboard,options.gtx,vfat,"VFATChannels.ChanReg%d"%(scCH),trimVal+64)
+        configureScanModule(ohboard, options.gtx, 3, mask, channel = scCH, scanmin = SCURVE_MIN, scanmax = SCURVE_MAX, numtrigs = int(N_EVENTS), useUltra = True, debug = options.debug)
+        printScanConfiguration(ohboard, options.gtx, useUltra = True, debug = options.debug)
+        startScanModule(ohboard, options.gtx, useUltra = True, debug = options.debug)
+        scanData = getUltraScanResults(ohboard, options.gtx, SCURVE_MAX - SCURVE_MIN + 1, options.debug)
+        for i in range(0,24):
+            vfatN[0] = i
+            dataNow = scanData[i]
+            trimRange[0] = (0x07 & readVFAT(ohboard,options.gtx, i,"ContReg3"))
+            trimDAC[0]   = (0x1f & readVFAT(ohboard,options.gtx, i,"VFATChannels.ChanReg%d"%(scCH)))
+            vthr[0]      = (0xff & readVFAT(ohboard,options.gtx, i,"VThreshold1"))
+            for VC in range(SCURVE_MAX-SCURVE_MIN+1):
+                try:
+                    vcal[0]  = int((dataNow[VC] & 0xff000000) >> 24)
+                    Nhits[0] = int(dataNow[VC] & 0xffffff)
+                except IndexError:
+                    print 'Unable to index data for channel %i'%scCH
+                    print dataNow
+                    vcal[0]  = -99
+                    Nhits[0] = -99
+                finally:
+                    myT.Fill()
+        for vfat in range(0,24):
+            trimVal = (0x3f & readVFAT(ohboard,options.gtx,vfat,"VFATChannels.ChanReg%d"%(scCH)))
+            writeVFAT(ohboard,options.gtx,vfat,"VFATChannels.ChanReg%d"%(scCH),trimVal)
+        myT.AutoSave("SaveSelf")
+        sys.stdout.flush()
+        pass
+    stopLocalT1(ohboard, options.gtx)
+    writeAllVFATs(ohboard, options.gtx, "ContReg0",    0x36, mask)
+
+except Exception as e:
+    myT.AutoSave("SaveSelf")
+    print "An exception occurred", e
+finally:
+    myF.cd()
+    myT.Write()
+    myF.Close()
+
+
+
 
